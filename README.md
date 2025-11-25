@@ -2,6 +2,8 @@
 
 AI-first platform that discovers and enriches B2B leads, generates collateral (CVs, proposals, decks), and powers a real-time 3D avatar chat assistant. The repository is structured as a monorepo with a TypeScript/Express backend plus a Vite/React frontend.
 
+Frontend preview - https://ai-sales-enablement-suite-frontend.vercel.app/
+
 ## Contents
 - [Repository Layout](#repository-layout)
 - [Core Capabilities](#core-capabilities)
