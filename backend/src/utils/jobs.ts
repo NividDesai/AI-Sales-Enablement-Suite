@@ -1,6 +1,18 @@
 import * as cheerio from "cheerio";
 import { logger } from "./logger";
 import { httpGet } from "./scrape";
+import { checkRobotsCompliance } from "./robots";
+import { config } from "../config";
+
+/**
+ * ⚠️ LEGAL NOTICE: Scraping job listings may violate:
+ * - Website terms of service
+ * - ATS platform terms (Lever, Greenhouse, Workable, etc.)
+ * - Data protection laws (GDPR, CCPA)
+ * 
+ * Always verify you have authorization before scraping job listings.
+ * Consider using official job APIs when available.
+ */
 
 export type JobPosting = {
   title: string;
@@ -37,6 +49,13 @@ export class JobListingEnricher {
 
     for (const url of urls) {
       try {
+        // Check robots.txt before scraping job listings
+        const compliance = await checkRobotsCompliance(url, config.userAgent);
+        if (!compliance.allowed) {
+          logger.warn("jobs:robots_disallowed", { url });
+          continue;
+        }
+        
         const html = await httpGet(url);
         if (!html) continue;
         const $ = cheerio.load(html);

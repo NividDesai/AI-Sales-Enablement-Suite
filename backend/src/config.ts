@@ -14,11 +14,14 @@ export const config = {
   newsApiKey: process.env.NEWS_API_KEY || "",
   userAgent:
     process.env.HTTP_USER_AGENT ||
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "AI-Sales-Enablement-Bot/1.0 (+https://github.com/NividDesai/AI-Sales-Enablement-Suite; contact: see repository)",
   // Lower default request timeout to speed up fallbacks; can override via env
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 8000),
-  // Slightly higher parallelism to speed scraping/enrichment; tune via env
-  parallelism: Number(process.env.PARALLELISM || 8),
+  // Reduced parallelism for legal compliance - respect rate limits and robots.txt
+  // Lower values reduce server load and legal risk
+  parallelism: Number(process.env.PARALLELISM || 3),
+  // Minimum delay between requests (milliseconds) - helps with rate limiting
+  minRequestDelay: Number(process.env.MIN_REQUEST_DELAY || 1000),
   hunterMaxEmailsPerDomain: Number(process.env.HUNTER_MAX_EMAILS_PER_DOMAIN || 1),
   runBudgetUsd: Number(process.env.RUN_BUDGET_USD || 0.5),
   providerUnitCosts: {

@@ -3,6 +3,17 @@ import * as cheerio from "cheerio";
 import pLimit from "p-limit";
 import { config } from "../config";
 import { logger } from "./logger";
+import { checkRobotsCompliance } from "./robots";
+
+/**
+ * LEGAL NOTICE: Web scraping may violate terms of service and applicable laws.
+ * This code includes robots.txt compliance checking, but you must:
+ * 1. Verify you have legal authorization to scrape target websites
+ * 2. Respect website terms of service
+ * 3. Comply with GDPR, CCPA, and other data protection laws
+ * 4. Only scrape publicly available data with proper legal basis
+ * 5. Consider using official APIs instead of scraping when available
+ */
 
 export type ScrapeResult = {
   url: string;
@@ -17,22 +28,77 @@ export type ScrapeResult = {
   addresses?: string[];
 };
 
-export async function httpGet(url: string): Promise<string | null> {
+// Track last request time per domain for rate limiting
+const lastRequestTime = new Map<string, number>();
+
+/**
+ * Get HTTP content with rate limiting and robots.txt compliance
+ */
+export async function httpGet(url: string, skipRobotsCheck: boolean = false): Promise<string | null> {
   try {
+    // Check robots.txt compliance (unless explicitly skipped)
+    if (!skipRobotsCheck) {
+      const compliance = await checkRobotsCompliance(url, config.userAgent);
+      if (!compliance.allowed) {
+        logger.warn("httpGet:robots_disallowed", { url });
+        return null;
+      }
+
+      // Respect crawl delay
+      const domain = new URL(url).hostname;
+      const lastTime = lastRequestTime.get(domain) || 0;
+      const delay = Math.max(compliance.crawlDelay, config.minRequestDelay || 1000);
+      const timeSinceLastRequest = Date.now() - lastTime;
+      
+      if (timeSinceLastRequest < delay) {
+        const waitTime = delay - timeSinceLastRequest;
+        logger.info("httpGet:rate_limit", { url, waitMs: waitTime });
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    } else {
+      // Even if skipping robots check, apply minimum delay
+      const domain = new URL(url).hostname;
+      const lastTime = lastRequestTime.get(domain) || 0;
+      const minDelay = config.minRequestDelay || 1000;
+      const timeSinceLastRequest = Date.now() - lastTime;
+      
+      if (timeSinceLastRequest < minDelay) {
+        await new Promise(resolve => setTimeout(resolve, minDelay - timeSinceLastRequest));
+      }
+    }
+
+    // Update last request time
+    const domain = new URL(url).hostname;
+    lastRequestTime.set(domain, Date.now());
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
     const res = await fetch(url, {
-      headers: { "user-agent": config.userAgent },
+      headers: { 
+        "user-agent": config.userAgent,
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
       signal: controller.signal as any,
     } as any);
     clearTimeout(timeout);
+    
+    // Handle rate limiting (429, 503)
+    if (res.status === 429 || res.status === 503) {
+      const retryAfter = res.headers.get('retry-after');
+      const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 5000;
+      logger.warn("httpGet:rate_limited", { url, status: res.status, retryAfter: waitTime });
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      // Retry once after waiting
+      return httpGet(url, skipRobotsCheck);
+    }
+
     if (!res.ok) {
       logger.warn("httpGet:status", { url, status: res.status });
       return null;
     }
     return await res.text();
-  } catch {
-    logger.warn("httpGet:failed", { url });
+  } catch (error: any) {
+    logger.warn("httpGet:failed", { url, error: error?.message });
     return null;
   }
 }
@@ -156,6 +222,14 @@ export function detectTechnologies($: cheerio.CheerioAPI): string[] {
 
 export async function scrapeWebsite(url: string): Promise<ScrapeResult | null> {
   logger.info("scrape:start", { url });
+  
+  // Check robots.txt before scraping
+  const compliance = await checkRobotsCompliance(url, config.userAgent);
+  if (!compliance.allowed) {
+    logger.warn("scrape:robots_disallowed", { url });
+    return null;
+  }
+
   const html = await httpGet(url);
   if (!html) return null;
   const $ = cheerio.load(html);
@@ -191,6 +265,14 @@ export async function scrapeWebsite(url: string): Promise<ScrapeResult | null> {
     for (const path of candidates) {
       try {
         const u2 = new URL(path, url).toString();
+        
+        // Check robots.txt for secondary pages too
+        const secondaryCompliance = await checkRobotsCompliance(u2, config.userAgent);
+        if (!secondaryCompliance.allowed) {
+          logger.warn("scrape:secondary_robots_disallowed", { url: u2 });
+          continue;
+        }
+        
         const html2 = await httpGet(u2);
         if (!html2) continue;
         const $2 = cheerio.load(html2);
@@ -223,10 +305,31 @@ export async function scrapeWebsite(url: string): Promise<ScrapeResult | null> {
 }
 
 export async function scrapeMany(urls: string[]): Promise<ScrapeResult[]> {
-  const limit = pLimit(config.parallelism);
-  const tasks = urls.map((u) => limit(() => scrapeWebsite(u)));
+  // Reduced parallelism for legal compliance
+  const safeParallelism = Math.min(config.parallelism || 3, 3);
+  const limit = pLimit(safeParallelism);
+  
+  logger.info("scrape:many:start", { count: urls.length, parallelism: safeParallelism });
+  
+  const tasks = urls.map((u) => limit(async () => {
+    try {
+      return await scrapeWebsite(u);
+    } catch (error: any) {
+      logger.warn("scrape:many:error", { url: u, error: error?.message });
+      return null;
+    }
+  }));
+  
   const results = await Promise.all(tasks);
-  return results.filter((r): r is ScrapeResult => Boolean(r));
+  const validResults = results.filter((r): r is ScrapeResult => Boolean(r));
+  
+  logger.info("scrape:many:complete", { 
+    total: urls.length, 
+    successful: validResults.length,
+    failed: urls.length - validResults.length 
+  });
+  
+  return validResults;
 }
 
 

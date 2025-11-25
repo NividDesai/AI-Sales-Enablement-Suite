@@ -3,6 +3,22 @@ import pLimit from "p-limit";
 import { config } from "../config";
 import { httpGet } from "../utils/scrape";
 import { logger } from "../utils/logger";
+
+/**
+ * ⚠️ LEGAL WARNING: Scraping search engines (Google, Bing) violates their Terms of Service.
+ * 
+ * This function is provided for educational purposes only. In production, you should:
+ * 1. Use official search APIs (Google Custom Search API, Bing Search API)
+ * 2. Obtain proper authorization before scraping
+ * 3. Consider using lead generation APIs (Apollo, Hunter.io) instead
+ * 
+ * Using this function may result in:
+ * - IP bans from search engines
+ * - Legal action for ToS violations
+ * - CFAA violations in the US
+ * 
+ * RECOMMENDATION: Replace this with official APIs or remove entirely.
+ */
 // OpenCorporates removed per request
 
 function toSearchUrl(engine: "google" | "bing", query: string): string {
@@ -59,42 +75,29 @@ function extractGoogleLinks(html: string): string[] {
   return normalizeAndFilter(decoded);
 }
 
+/**
+ * DISABLED FOR LEGAL COMPLIANCE
+ * 
+ * Search engine scraping violates Google and Bing Terms of Service.
+ * This function has been disabled to ensure legal compliance.
+ * 
+ * To enable lead discovery, use one of these compliant alternatives:
+ * 1. Google Custom Search API: https://developers.google.com/custom-search
+ * 2. Bing Search API: https://www.microsoft.com/en-us/bing/apis/bing-web-search-api
+ * 3. Lead generation APIs: Apollo.io, Hunter.io, Clearbit
+ * 4. LinkedIn Sales Navigator API (if available)
+ */
 export async function simulateSearch(queries: string[], engine: "google" | "bing" = "bing"): Promise<string[]> {
-  const limit = pLimit(config.parallelism);
-  const tasks = queries.map((q) =>
-    limit(async () => {
-      const url = toSearchUrl(engine, q);
-      logger.info("search:fetch", { engine, query: q });
-      const html = await httpGet(url);
-      if (!html) return [] as string[];
-      if (engine === "google") return extractGoogleLinks(html);
-      return extractResultLinks(html);
-    })
-  );
-  const pages = await Promise.all(tasks);
-  const links = pages.flat();
-  const unique = Array.from(new Set(links)).filter((u) => validUrl.isWebUri(u));
-  logger.info("search:links", { count: unique.length });
-  if (unique.length === 0 && engine === "google") {
-    // Fallback to Bing if Google yields nothing (likely due to anti-bot measures)
-    logger.info("search:fallback", { from: "google", to: "bing" });
-    const limit2 = pLimit(config.parallelism);
-    const tasks2 = queries.map((q) =>
-      limit2(async () => {
-        const url = toSearchUrl("bing", q);
-        logger.info("search:fetch", { engine: "bing", query: q });
-        const html = await httpGet(url);
-        if (!html) return [] as string[];
-        return extractResultLinks(html);
-      })
-    );
-    const pages2 = await Promise.all(tasks2);
-    const links2 = pages2.flat();
-    const unique2 = Array.from(new Set(links2)).filter((u) => validUrl.isWebUri(u));
-    logger.info("search:links", { count: unique2.length });
-    return unique2.slice(0, 100);
-  }
-  return unique.slice(0, 100);
+  logger.error("search:disabled", {
+    message: "Search engine scraping is disabled for legal compliance.",
+    reason: "Violates Google and Bing Terms of Service",
+    recommendation: "Use Google Custom Search API or Bing Search API instead",
+    queries: queries.length,
+    engine
+  });
+  
+  // Return empty array - search engine scraping is disabled
+  return [];
 }
 
 export function buildBaseQueries(params: {

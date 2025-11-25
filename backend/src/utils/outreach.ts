@@ -8,6 +8,8 @@ export type SenderProfile = {
   title: string;
   company: string;
   email: string;
+  // REQUIRED for CAN-SPAM compliance
+  physicalAddress: string; // Street address, city, state, ZIP code
   phone?: string;
   meetingLink?: string;
   websiteUrl?: string;
@@ -41,13 +43,35 @@ function systemPrompt(tone: string) {
 \nFormat the response as:\nSubject: [subject line]\n---\n[email body]`;
 }
 
-function addTrackingPixel(body: string, leadId: string): string {
+/**
+ * Add tracking pixel with disclosure (required for legal compliance)
+ * Includes disclosure text as required by privacy laws
+ */
+function addTrackingPixel(body: string, leadId: string, baseUrl?: string): string {
   try {
-    const pixelUrl = `http://localhost:${config.port}/api/track/${encodeURIComponent(leadId)}`;
-    const pixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" />`;
-    return `${body}\n\n${pixel}`;
+    const base = baseUrl || `http://localhost:${config.port}`;
+    const pixelUrl = `${base}/api/track/${encodeURIComponent(leadId)}`;
+    const pixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" alt="" />`;
+    
+    // Add tracking disclosure (required by GDPR, CCPA, and best practices)
+    const disclosure = `\n\n---\n<small style="color:#666;font-size:11px;">This email contains a tracking pixel to measure engagement. You can disable image loading in your email client to prevent tracking.</small>`;
+    
+    return `${body}${disclosure}\n\n${pixel}`;
   } catch {
     return body;
+  }
+}
+
+/**
+ * Generate unsubscribe link (required for CAN-SPAM, GDPR, CASL compliance)
+ */
+function generateUnsubscribeLink(email: string, leadId: string, baseUrl?: string): string {
+  try {
+    const base = baseUrl || `http://localhost:${config.port}`;
+    const token = Buffer.from(`${email}:${leadId}:${Date.now()}`).toString('base64');
+    return `${base}/api/unsubscribe?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
+  } catch {
+    return "#";
   }
 }
 
@@ -150,11 +174,16 @@ export async function generateDraftEmail(lead: LeadRaw, profile: SenderProfile):
       else subject = `Quick question`;
     }
 
+    // Build compliant email body with all required elements
+    const baseUrl = process.env.BASE_URL || `http://localhost:${config.port}`;
+    const unsubscribeLink = generateUnsubscribeLink(lead.email || "", lead.leadId, baseUrl);
+    const emailBody = `${bodyText}\n\n${signature(profile, unsubscribeLink)}\n\n${getComplianceFooter(profile, unsubscribeLink)}`;
+    
     const draft: DraftEmail = {
       to: lead.email || "",
       from: `${profile.name} <${profile.email}>`,
       subject,
-      body: addTrackingPixel(`${bodyText}\n\n${signature(profile)}`.trim(), lead.leadId),
+      body: addTrackingPixel(emailBody.trim(), lead.leadId, baseUrl),
       leadId: lead.leadId,
       lead,
       generatedAt: new Date().toISOString(),
@@ -166,8 +195,28 @@ export async function generateDraftEmail(lead: LeadRaw, profile: SenderProfile):
   }
 }
 
-function signature(profile: SenderProfile): string {
-  return `Best regards,\n\n${profile.name}\n${profile.title}\n${profile.company}\n${profile.phone ? `📱 ${profile.phone}` : ''}\n${profile.linkedinUrl ? `💼 ${profile.linkedinUrl}` : ''}\n${profile.websiteUrl ? `🌐 ${profile.websiteUrl}` : ''}\n${profile.meetingLink ? `📅 Book a call: ${profile.meetingLink}` : ''}`.trim();
+function signature(profile: SenderProfile, unsubscribeLink: string): string {
+  const parts = [
+    `Best regards,`,
+    ``,
+    profile.name,
+    profile.title,
+    profile.company,
+    profile.physicalAddress, // REQUIRED for CAN-SPAM
+    profile.phone ? `📱 ${profile.phone}` : '',
+    profile.linkedinUrl ? `💼 ${profile.linkedinUrl}` : '',
+    profile.websiteUrl ? `🌐 ${profile.websiteUrl}` : '',
+    profile.meetingLink ? `📅 Book a call: ${profile.meetingLink}` : ''
+  ].filter(Boolean);
+  
+  return parts.join('\n');
+}
+
+/**
+ * Generate compliance footer with unsubscribe link (required by CAN-SPAM, GDPR, CASL)
+ */
+function getComplianceFooter(profile: SenderProfile, unsubscribeLink: string): string {
+  return `\n---\n\nYou are receiving this email because we believe you may be interested in ${profile.company}'s services. If you no longer wish to receive emails from us, please [unsubscribe here](${unsubscribeLink}).\n\nThis email was sent to you in compliance with applicable email marketing laws.`;
 }
 
 export async function sendEmails(
@@ -177,6 +226,38 @@ export async function sendEmails(
 ): Promise<{ sent: DraftEmail[]; failed: Array<DraftEmail & { error: string }> }> {
   const sent: DraftEmail[] = [];
   const failed: Array<DraftEmail & { error: string }> = [];
+  
+  // Check unsubscribes before sending (CAN-SPAM, GDPR, CASL requirement)
+  const { isUnsubscribed } = await import("./unsubscribe");
+  const { hasConsent } = await import("./privacy");
+  
+  const validDrafts = drafts.filter(d => {
+    // Check if unsubscribed
+    if (isUnsubscribed(d.to)) {
+      logger.info("outreach:send:unsubscribed", { email: d.to });
+      failed.push({ ...d, error: "Email address has unsubscribed" });
+      return false;
+    }
+    
+    // Check consent (GDPR requirement) - for cold emails, we assume legitimate interest
+    // but you should verify consent for marketing emails
+    // Uncomment the following if you require explicit consent:
+    /*
+    if (!hasConsent(d.to, "email_marketing")) {
+      logger.info("outreach:send:no_consent", { email: d.to });
+      failed.push({ ...d, error: "No consent for email marketing" });
+      return false;
+    }
+    */
+    
+    return true;
+  });
+
+  if (validDrafts.length === 0) {
+    logger.warn("outreach:send:no_valid_drafts", { total: drafts.length });
+    return { sent, failed };
+  }
+
   let transporter: any = null;
   try {
     const nodemailer = require("nodemailer");
@@ -197,13 +278,24 @@ export async function sendEmails(
   } catch (e: any) {
     // Nodemailer not installed or verify failed
     logger.warn("outreach:send:verify_failed", { provider, error: e?.message });
-    for (const d of drafts) failed.push({ ...d, error: e?.message || "Email transport not available" });
+    for (const d of validDrafts) failed.push({ ...d, error: e?.message || "Email transport not available" });
     return { sent, failed };
   }
 
-  for (const d of drafts) {
+  for (const d of validDrafts) {
     try {
-      await transporter.sendMail({ from: d.from, to: d.to, subject: d.subject, text: d.body, html: d.body.replace(/\n/g, '<br>') });
+      // Convert plain text to HTML while preserving line breaks
+      const htmlBody = d.body
+        .replace(/\n/g, '<br>')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'); // Convert markdown links
+      
+      await transporter.sendMail({ 
+        from: d.from, 
+        to: d.to, 
+        subject: d.subject, 
+        text: d.body,
+        html: htmlBody
+      });
       sent.push(d);
     } catch (e: any) {
       logger.warn("outreach:send:failed", { to: d.to, error: e?.message });
