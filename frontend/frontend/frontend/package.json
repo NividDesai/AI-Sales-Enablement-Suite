@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "animejs": "^4.2.2",
+    "motion": "^12.23.24"
+  }
+}
